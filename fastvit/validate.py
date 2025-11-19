@@ -11,6 +11,15 @@ canonical PyTorch, standard Python style, and good performance. Repurpose as you
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+import sys
+from pathlib import Path
+
+# Add project root to path to allow running from root directory
+_script_dir = Path(__file__).resolve().parent
+_project_root = _script_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import argparse
 import os
 import csv
@@ -39,8 +48,8 @@ from timm.utils import (
     set_jit_legacy,
 )
 
-import models
-from models.modules.mobileone import reparameterize_model
+import fastvit.models as models
+from fastvit.models.modules.mobileone import reparameterize_model
 
 has_apex = False
 try:

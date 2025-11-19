@@ -18,6 +18,15 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by / Copyright 2020 Ross Wightman (https://github.com/rwightman)
 """
+import sys
+from pathlib import Path
+
+# Add project root to path to allow running from root directory
+_script_dir = Path(__file__).resolve().parent
+_project_root = _script_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import argparse
 import time
 import yaml
@@ -56,9 +65,9 @@ from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler
 from timm.utils import ApexScaler, NativeScaler
 
-import models
-from misc.distillation_loss import DistillationLoss
-from misc.cosine_annealing import CosineWDSchedule
+import fastvit.models as models
+from fastvit.misc.distillation_loss import DistillationLoss
+from fastvit.misc.cosine_annealing import CosineWDSchedule
 
 try:
     from apex import amp
@@ -693,6 +702,15 @@ parser.add_argument(
     type=float,
     help="Temperature to soften teacher logits",
 )
+parser.add_argument(
+    "--freeze-stages",
+    type=int,
+    nargs="+",
+    default=None,
+    metavar="N",
+    help="Freeze model stages up to specified indices (e.g., --freeze-stages 0 1 freezes stages 0 and 1). "
+    "Stages are 0-indexed. Classification head is always trainable.",
+)
 
 # Misc
 parser.add_argument(
@@ -838,6 +856,91 @@ parser.add_argument(
 )
 
 
+def freeze_model_stages(model, freeze_stages, local_rank=0):
+    """
+    Freeze specific stages of a FastViT model.
+    
+    Args:
+        model: FastViT model instance
+        freeze_stages: List of stage indices to freeze (0-indexed)
+        local_rank: Rank for logging
+    
+    The model structure:
+    - patch_embed: Convolutional stem
+    - network: ModuleList containing [stage0, PatchEmbed, stage1, PatchEmbed, ...]
+    - conv_exp, gap, head: Classification head (always kept trainable)
+    """
+    if freeze_stages is None or len(freeze_stages) == 0:
+        return
+    
+    freeze_stages = sorted(set(freeze_stages))
+    max_stage = max(freeze_stages)
+    
+    # Count total stages by checking network structure
+    # Network alternates: stage, PatchEmbed, stage, PatchEmbed, ...
+    num_stages = (len(model.network) + 1) // 2
+    
+    if max_stage >= num_stages:
+        if local_rank == 0:
+            _logger.warning(
+                f"Max freeze stage {max_stage} >= total stages {num_stages}. "
+                f"Only freezing up to stage {num_stages - 1}."
+            )
+        freeze_stages = [s for s in freeze_stages if s < num_stages]
+    
+    if not freeze_stages:
+        return
+    
+    frozen_components = []
+    
+    # Freeze patch_embed if stage 0 is frozen
+    if 0 in freeze_stages:
+        for param in model.patch_embed.parameters():
+            param.requires_grad = False
+        frozen_components.append("patch_embed")
+    
+    # Freeze stages and PatchEmbed layers
+    # Network structure: [stage0, PatchEmbed01, stage1, PatchEmbed12, stage2, ...]
+    for stage_idx in freeze_stages:
+        # Freeze the stage itself (even indices: 0, 2, 4, ...)
+        stage_network_idx = stage_idx * 2
+        if stage_network_idx < len(model.network):
+            for param in model.network[stage_network_idx].parameters():
+                param.requires_grad = False
+            frozen_components.append(f"network[{stage_network_idx}] (stage {stage_idx})")
+        
+        # Freeze the PatchEmbed after this stage (odd indices: 1, 3, 5, ...)
+        # But not after the last stage
+        if stage_idx < num_stages - 1:
+            patch_embed_idx = stage_idx * 2 + 1
+            if patch_embed_idx < len(model.network):
+                for param in model.network[patch_embed_idx].parameters():
+                    param.requires_grad = False
+                frozen_components.append(f"network[{patch_embed_idx}] (PatchEmbed after stage {stage_idx})")
+    
+    # Ensure classification head is always trainable
+    for param in model.conv_exp.parameters():
+        param.requires_grad = True
+    for param in model.gap.parameters():
+        param.requires_grad = True
+    for param in model.head.parameters():
+        param.requires_grad = True
+    
+    if local_rank == 0:
+        _logger.info(f"Frozen stages: {freeze_stages}")
+        _logger.info(f"Frozen components: {', '.join(frozen_components)}")
+        
+        # Count trainable vs frozen parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
+        
+        _logger.info(
+            f"Parameters: {trainable_params:,} trainable, {frozen_params:,} frozen "
+            f"({100 * frozen_params / total_params:.1f}% frozen)"
+        )
+
+
 def _parse_args():
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
@@ -976,7 +1079,18 @@ def main():
         assert not args.sync_bn, "Cannot use SyncBatchNorm with torchscripted model"
         model = torch.jit.script(model)
 
+    # Freeze specified stages before creating optimizer
+    if args.freeze_stages is not None:
+        freeze_model_stages(model, args.freeze_stages, args.local_rank)
+        # Recreate optimizer with only trainable parameters
+        # The optimizer will automatically exclude parameters with requires_grad=False
+
     optimizer = create_optimizer_v2(model, **optimizer_kwargs(cfg=args))
+    
+    # Log optimizer parameter groups info
+    if args.local_rank == 0 and args.freeze_stages is not None:
+        total_opt_params = sum(sum(p.numel() for p in group["params"]) for group in optimizer.param_groups)
+        _logger.info(f"Optimizer has {len(optimizer.param_groups)} parameter groups with {total_opt_params:,} total parameters")
 
     # setup automatic mixed-precision (AMP) loss scaling and op casting
     amp_autocast = suppress  # do nothing
@@ -1017,13 +1131,24 @@ def main():
             print(
                 "Finetune option selected, not loading optimizer state and loss_scaler"
             )
-            _ = resume_checkpoint(
-                model,
-                args.resume,
-                optimizer=None,
-                loss_scaler=None,
-                log_info=args.local_rank == 0,
-            )
+            # Handle different checkpoint formats (state_dict, model, or direct state_dict)
+            checkpoint = torch.load(args.resume, map_location="cpu")
+            if "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            elif "model" in checkpoint:
+                state_dict = checkpoint["model"]
+            else:
+                # Assume checkpoint is the state_dict itself
+                state_dict = checkpoint
+            
+            # Load state dict with strict=False to handle mismatched keys (e.g., different num_classes)
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            if args.local_rank == 0:
+                if missing_keys:
+                    _logger.info(f"Missing keys when loading checkpoint: {missing_keys[:5]}...")
+                if unexpected_keys:
+                    _logger.info(f"Unexpected keys when loading checkpoint: {unexpected_keys[:5]}...")
+                _logger.info("Loaded pretrained weights for finetuning")
 
             data_config["crop_pct"] = 1.0
             print("data config: {}".format(data_config))
@@ -1104,7 +1229,14 @@ def main():
             )
         else:
             checkpoint = torch.load(args.teacher_path, map_location="cpu")
-        teacher_model.load_state_dict(checkpoint["model"])
+        # Handle different checkpoint formats
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+        teacher_model.load_state_dict(state_dict)
         teacher_model.cuda()
         teacher_model.eval()
 
