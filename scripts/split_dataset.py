@@ -17,7 +17,7 @@ TRAINVAL_LIST = ANNOTATIONS_DIR / "trainval.txt"
 TEST_LIST = ANNOTATIONS_DIR / "test.txt"
 
 TRAIN_DIR = ROOT_DIR / "data" / "train"
-VAL_DIR = ROOT_DIR / "data" / "val"
+VAL_DIR = ROOT_DIR / "data" / "validation"
 TEST_DIR = ROOT_DIR / "data" / "test"
 
 TRAIN_LABELS = ROOT_DIR / "data" / "train_labels.csv"
@@ -86,7 +86,7 @@ def write_labels(names: Iterable[str], metadata: Dict[str, Dict[str, str]], path
             info = metadata[name]
             writer.writerow(
                 [
-                    f"{name}.jpg",
+                    f"{info['class_name']}/{name}.jpg",
                     info["class_name"],
                     info["class_id"],
                     info["species"],
@@ -97,7 +97,8 @@ def write_labels(names: Iterable[str], metadata: Dict[str, Dict[str, str]], path
 
 def populate_split(names: Iterable[str], metadata: Dict[str, Dict[str, str]], directory: Path) -> None:
     for name in names:
-        resize_and_copy(name, directory / f"{name}.jpg")
+        class_name = metadata[name]["class_name"]
+        resize_and_copy(name, directory / class_name / f"{name}.jpg")
 
 
 def split_test(names: List[str], metadata: Dict[str, Dict[str, str]]) -> Tuple[List[str], List[str]]:
