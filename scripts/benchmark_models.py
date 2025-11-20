@@ -28,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-size", type=int, default=256, help="Input image size (default: 256).")
     parser.add_argument("--torchscript", type=Path, default=None, help="Path to TorchScript model.")
     parser.add_argument("--onnx", type=Path, default=None, help="Path to ONNX model.")
+    parser.add_argument("--exports-dir", type=Path, default=Path("exports"), help="Base directory where exported models are stored (default: exports).")
+    parser.add_argument("--subdir", type=str, default=None, help="Subdirectory within exports-dir (e.g., 'teacher', 'student'). If not specified, looks directly in exports-dir.")
     parser.add_argument("--device", type=str, default=None, help="Device (default: cuda if available, else cpu).")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations.")
     parser.add_argument("--runs", type=int, default=100, help="Timed iterations.")
@@ -90,8 +92,8 @@ def load_fastvit_checkpoint(
         num_classes=num_classes,
     )
     
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Load checkpoint (weights_only=False for checkpoints that may contain argparse.Namespace)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Handle different checkpoint formats
     if use_ema and "model_ema" in checkpoint:
@@ -177,29 +179,57 @@ def main() -> int:
     print(f"Benchmarking PyTorch model (warmup={args.warmup}, runs={args.runs})...")
     results["pytorch"] = benchmark_pytorch(pytorch_model, dummy, args.warmup, args.runs)
 
+    # Determine default export paths
+    if args.subdir:
+        exports_base = ROOT_DIR / args.exports_dir / args.subdir
+    else:
+        exports_base = ROOT_DIR / args.exports_dir
+    
     # TorchScript
-    ts_path = args.torchscript or (ROOT_DIR / "exports" / "model_scripted.pt")
+    if args.torchscript:
+        ts_path = args.torchscript
+    else:
+        ts_path = exports_base / "model_scripted.pt"
+    
     if ts_path.exists():
         print(f"\n--- Benchmarking TorchScript model: {ts_path} ---")
         results["torchscript"] = benchmark_torchscript(ts_path, dummy, device, args.warmup, args.runs)
     else:
         print(f"\n[warn] TorchScript model not found at {ts_path}. Skipping.")
+        print(f"      (Checked: {ts_path.absolute()})")
 
     # ONNX (expects same input size as model)
-    onnx_path = args.onnx or (ROOT_DIR / "exports" / "model.onnx")
+    if args.onnx:
+        onnx_path = args.onnx
+    else:
+        onnx_path = exports_base / "model.onnx"
+    
     if onnx_path.exists():
         print(f"\n--- Benchmarking ONNX model: {onnx_path} ---")
         dummy_onnx = torch.randn(args.batch_size, 3, input_size, input_size).numpy()
         results["onnx"] = benchmark_onnx(onnx_path, dummy_onnx, args.warmup, args.runs)
     else:
         print(f"\n[warn] ONNX model not found at {onnx_path}. Skipping.")
+        print(f"      (Checked: {onnx_path.absolute()})")
 
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("--- Benchmark Results ---")
-    print("="*60)
+    print("="*70)
+    print(f"Batch size: {args.batch_size}, Runs: {args.runs}, Warmup: {args.warmup}")
+    print("-"*70)
     for name, metrics in results.items():
-        print(f"{name:15s}: FPS={metrics['fps']:8.2f}  Latency={metrics['latency']*1000:6.2f}ms  Total={metrics['total_time']:.3f}s")
-    print("="*60)
+        # Latency is per batch, so time per image = latency / batch_size
+        time_per_image_ms = (metrics['latency'] * 1000) / args.batch_size
+        print(f"{name:15s}: FPS={metrics['fps']:8.2f}  "
+              f"Latency/batch={metrics['latency']*1000:6.2f}ms  "
+              f"Time/image={time_per_image_ms:6.2f}ms  "
+              f"Total={metrics['total_time']:.3f}s")
+    print("="*70)
+    print(f"\nNote: Time per image = Latency per batch / batch size")
+    if args.batch_size == 1:
+        print("      (With batch_size=1, latency equals time per image)")
+    else:
+        print(f"      (With batch_size={args.batch_size}, processing {args.batch_size} images per batch)")
 
     return 0
 
