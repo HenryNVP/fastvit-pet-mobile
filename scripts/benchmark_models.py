@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -16,29 +15,25 @@ import sys
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.config import load_configs, to_namespace
-from src.models import create_model
-from src.utils import get_device
-from scripts.export_models import (
-    infer_sizes,
-    load_checkpoint_weights,
-    CenterCropModule,
-)
+from timm.models import create_model
+import fastvit.models as models  # Register FastViT models with timm
+from fastvit.models.modules.mobileone import reparameterize_model
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark inference speed across model formats.")
-    parser.add_argument("--checkpoint", type=Path, required=True, help="Path to checkpoint.")
-    parser.add_argument("--model-config", type=Path, default=Path("configs/model/regnety_016.yaml"))
-    parser.add_argument("--train-config", type=Path, default=Path("configs/train.yaml"))
-    parser.add_argument("--data-config", type=Path, default=Path("configs/data.yaml"))
-    parser.add_argument("--aug-config", type=Path, default=Path("configs/aug.yaml"))
+    parser = argparse.ArgumentParser(description="Benchmark inference speed across model formats for FastViT models.")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="Path to FastViT checkpoint.")
+    parser.add_argument("--model", type=str, default="fastvit_t8", help="FastViT model name (e.g., fastvit_t8, fastvit_s12).")
+    parser.add_argument("--num-classes", type=int, default=1000, help="Number of classes (default: 1000 for ImageNet).")
+    parser.add_argument("--input-size", type=int, default=256, help="Input image size (default: 256).")
     parser.add_argument("--torchscript", type=Path, default=None, help="Path to TorchScript model.")
     parser.add_argument("--onnx", type=Path, default=None, help="Path to ONNX model.")
-    parser.add_argument("--device", type=str, default=None, help="Device (default: auto).")
+    parser.add_argument("--device", type=str, default=None, help="Device (default: cuda if available, else cpu).")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations.")
     parser.add_argument("--runs", type=int, default=100, help="Timed iterations.")
     parser.add_argument("--batch-size", type=int, default=1, help="Batch size.")
+    parser.add_argument("--use-ema", action="store_true", help="Use EMA model weights if available in checkpoint.")
+    parser.add_argument("--reparameterize", action="store_true", help="Reparameterize model for faster inference (recommended).")
     return parser.parse_args()
 
 
@@ -80,43 +75,131 @@ def benchmark_onnx(path: Path, dummy: np.ndarray, warmup: int, runs: int) -> Dic
     return {"fps": fps, "latency": latency, "total_time": elapsed}
 
 
+def load_fastvit_checkpoint(
+    checkpoint_path: Path,
+    model_name: str,
+    num_classes: int,
+    device: torch.device,
+    use_ema: bool = False,
+) -> torch.nn.Module:
+    """Load a FastViT model from checkpoint."""
+    # Create model
+    model = create_model(
+        model_name,
+        pretrained=False,
+        num_classes=num_classes,
+    )
+    
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Handle different checkpoint formats
+    if use_ema and "model_ema" in checkpoint:
+        print("Loading EMA model weights from checkpoint")
+        state_dict = checkpoint["model_ema"]
+    elif "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    elif "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        # Assume checkpoint is the state_dict itself
+        state_dict = checkpoint
+    
+    # Filter out keys with shape mismatches (e.g., classification head with different num_classes)
+    model_state_dict = model.state_dict()
+    filtered_state_dict = {}
+    skipped_keys = []
+    for key, value in state_dict.items():
+        if key in model_state_dict:
+            # Check if shapes match
+            if model_state_dict[key].shape == value.shape:
+                filtered_state_dict[key] = value
+            else:
+                skipped_keys.append(f"  - {key} (shape mismatch: {value.shape} -> {model_state_dict[key].shape})")
+        else:
+            skipped_keys.append(f"  - {key} (not in model)")
+    
+    # Load with strict=False to handle mismatched keys
+    missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
+    
+    if skipped_keys:
+        print(f"Skipped {len(skipped_keys)} keys due to shape mismatch or not in model:")
+        for key in skipped_keys[:10]:  # Show first 10
+            print(key)
+        if len(skipped_keys) > 10:
+            print(f"  ... and {len(skipped_keys) - 10} more")
+    
+    if missing_keys:
+        print(f"Warning: {len(missing_keys)} missing keys (first 5: {missing_keys[:5]})")
+    if unexpected_keys:
+        print(f"Warning: {len(unexpected_keys)} unexpected keys (first 5: {unexpected_keys[:5]})")
+    
+    print(f"Loaded {len(filtered_state_dict)}/{len(state_dict)} weights from checkpoint")
+    
+    return model
+
+
 def main() -> int:
     args = parse_args()
-    config = load_configs([args.train_config, args.data_config, args.model_config, args.aug_config])
-    model_cfg = to_namespace(config["model"])
-    augment_cfg = config.get("augment")
-
-    input_size, crop_size = infer_sizes(augment_cfg, fallback=224)
-    device_name = args.device or get_device(config.get("train", {}).get("device_preference"))
-    device = torch.device(device_name)
-
+    
+    # Determine device
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    print(f"Using device: {device}")
+    print(f"Model: {args.model}, Input size: {args.input_size}, Num classes: {args.num_classes}")
+    print(f"Checkpoint: {args.checkpoint}")
+    
     results: Dict[str, Dict[str, float]] = {}
+    input_size = args.input_size
 
-    # PyTorch model
-    pytorch_model = create_model(model_cfg).to(device)
-    load_checkpoint_weights(pytorch_model, args.checkpoint, device)
+    # Load and benchmark PyTorch model
+    print("\n--- Loading PyTorch model ---")
+    pytorch_model = load_fastvit_checkpoint(
+        args.checkpoint,
+        args.model,
+        args.num_classes,
+        device,
+        use_ema=args.use_ema,
+    )
+    
+    # Reparameterize if requested (for faster inference)
+    if args.reparameterize:
+        print("Reparameterizing model for faster inference...")
+        pytorch_model = reparameterize_model(pytorch_model)
+    
+    pytorch_model = pytorch_model.to(device)
     pytorch_model.eval()
+    
     dummy = torch.randn(args.batch_size, 3, input_size, input_size, device=device)
+    print(f"Benchmarking PyTorch model (warmup={args.warmup}, runs={args.runs})...")
     results["pytorch"] = benchmark_pytorch(pytorch_model, dummy, args.warmup, args.runs)
 
     # TorchScript
-    ts_path = args.torchscript or (Path("exports") / "model_scripted.pt")
+    ts_path = args.torchscript or (ROOT_DIR / "exports" / "model_scripted.pt")
     if ts_path.exists():
+        print(f"\n--- Benchmarking TorchScript model: {ts_path} ---")
         results["torchscript"] = benchmark_torchscript(ts_path, dummy, device, args.warmup, args.runs)
     else:
-        print(f"[warn] TorchScript model not found at {ts_path}. Skipping.")
+        print(f"\n[warn] TorchScript model not found at {ts_path}. Skipping.")
 
-    # ONNX (expects cropped input)
-    onnx_path = args.onnx or (Path("exports") / "model.onnx")
+    # ONNX (expects same input size as model)
+    onnx_path = args.onnx or (ROOT_DIR / "exports" / "model.onnx")
     if onnx_path.exists():
-        dummy_onnx = torch.randn(args.batch_size, 3, crop_size, crop_size).numpy()
+        print(f"\n--- Benchmarking ONNX model: {onnx_path} ---")
+        dummy_onnx = torch.randn(args.batch_size, 3, input_size, input_size).numpy()
         results["onnx"] = benchmark_onnx(onnx_path, dummy_onnx, args.warmup, args.runs)
     else:
-        print(f"[warn] ONNX model not found at {onnx_path}. Skipping.")
+        print(f"\n[warn] ONNX model not found at {onnx_path}. Skipping.")
 
+    print("\n" + "="*60)
     print("--- Benchmark Results ---")
+    print("="*60)
     for name, metrics in results.items():
-        print(f"{name}: FPS={metrics['fps']:.2f} Latency={metrics['latency']*1000:.2f}ms Total={metrics['total_time']:.3f}s")
+        print(f"{name:15s}: FPS={metrics['fps']:8.2f}  Latency={metrics['latency']*1000:6.2f}ms  Total={metrics['total_time']:.3f}s")
+    print("="*60)
 
     return 0
 

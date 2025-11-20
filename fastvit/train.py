@@ -1141,14 +1141,35 @@ def main():
                 # Assume checkpoint is the state_dict itself
                 state_dict = checkpoint
             
-            # Load state dict with strict=False to handle mismatched keys (e.g., different num_classes)
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            # Filter out keys with shape mismatches (e.g., classification head with different num_classes)
+            model_state_dict = model.state_dict()
+            filtered_state_dict = {}
+            skipped_keys = []
+            for key, value in state_dict.items():
+                if key in model_state_dict:
+                    # Check if shapes match
+                    if model_state_dict[key].shape == value.shape:
+                        filtered_state_dict[key] = value
+                    else:
+                        skipped_keys.append(f"{key} (shape mismatch: {value.shape} -> {model_state_dict[key].shape})")
+                else:
+                    # Key not in model, skip it
+                    skipped_keys.append(f"{key} (not in model)")
+            
+            # Load filtered state dict
+            missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
             if args.local_rank == 0:
                 if missing_keys:
                     _logger.info(f"Missing keys when loading checkpoint: {missing_keys[:5]}...")
                 if unexpected_keys:
                     _logger.info(f"Unexpected keys when loading checkpoint: {unexpected_keys[:5]}...")
-                _logger.info("Loaded pretrained weights for finetuning")
+                if skipped_keys:
+                    _logger.info(f"Skipped {len(skipped_keys)} keys due to shape mismatch or not in model:")
+                    for key in skipped_keys[:5]:
+                        _logger.info(f"  - {key}")
+                    if len(skipped_keys) > 5:
+                        _logger.info(f"  ... and {len(skipped_keys) - 5} more")
+                _logger.info(f"Loaded {len(filtered_state_dict)}/{len(state_dict)} pretrained weights for finetuning")
 
             data_config["crop_pct"] = 1.0
             print("data config: {}".format(data_config))
