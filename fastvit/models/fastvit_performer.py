@@ -180,7 +180,7 @@ class MHSA(nn.Module):
         x = self.proj_drop(x)
 
         # Restore to 4D if input was 4D
-        if orig_shape.dim() == 4:
+        if len(orig_shape) == 4:       
             x = x.transpose(1, 2).reshape(B, C, H, W)
 
         return x
