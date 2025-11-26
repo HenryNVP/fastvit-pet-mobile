@@ -11,3 +11,4 @@ from .fastvit import (
     fastvit_sa36,
     fastvit_ma36,
 )
+from .fastvit_performer import *  
