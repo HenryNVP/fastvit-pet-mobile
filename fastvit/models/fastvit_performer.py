@@ -974,7 +974,7 @@ def fastvit_t8_P(pretrained=False, **kwargs):
     embed_dims = [48, 96, 192, 384]
     mlp_ratios = [3, 3, 3, 3]
     downsamples = [True, True, True, True]
-    token_mixers = ("repmixer", "repmixer", "repmixer", "attention")
+    token_mixers = ("repmixer", "repmixer", "repmixer", "repmixer")
     model = FastViT_Performer(
         layers,
         token_mixers=token_mixers,
