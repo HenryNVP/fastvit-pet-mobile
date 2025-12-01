@@ -988,4 +988,25 @@ def fastvit_t8_P(pretrained=False, **kwargs):
         raise ValueError("Functionality not implemented.")
     return model
 
-
+@register_model
+def fastvit_sa12_P(pretrained=False, **kwargs):
+    """Instantiate FastViT_Performer-SA12 model variant."""
+    layers = [2, 2, 6, 2]
+    embed_dims = [64, 128, 256, 512]
+    mlp_ratios = [4, 4, 4, 4]
+    downsamples = [True, True, True, True]
+    pos_embs = [None, None, None, partial(RepCPE, spatial_shape=(7, 7))]
+    token_mixers = ("repmixer", "repmixer", "repmixer", "attention")
+    model = FastViT_Performer(
+        layers,
+        token_mixers=token_mixers,
+        embed_dims=embed_dims,
+        pos_embs=pos_embs,
+        mlp_ratios=mlp_ratios,
+        downsamples=downsamples,
+        **kwargs,
+    )
+    model.default_cfg = default_cfgs["fastvit_s"]
+    if pretrained:
+        raise ValueError("Functionality not implemented.")
+    return model

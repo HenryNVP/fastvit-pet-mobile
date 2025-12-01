@@ -85,7 +85,9 @@ def list_available_models():
         # This would need to be updated if more performer models are added
         try:
             from .fastvit_performer import fastvit_t8_P
+            from .fastvit_performer import fastvit_sa12_P
             models['performer'].append('fastvit_t8_P')
+            models['performer'].append('fastvit_sa12_P')
         except (ImportError, AttributeError):
             pass
     
