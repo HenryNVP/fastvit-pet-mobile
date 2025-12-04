@@ -1249,7 +1249,13 @@ def main():
                 args.teacher_path, map_location="cpu", check_hash=True
             )
         else:
-            checkpoint = torch.load(args.teacher_path, map_location="cpu")
+            #checkpoint = torch.load(args.teacher_path, map_location="cpu")
+        #explicitly disable weights_only so full checkpoint can be unpickled
+            checkpoint = torch.load(
+                args.teacher_path,
+                map_location="cpu",
+                weights_only=False,
+            )
         # Handle different checkpoint formats
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
