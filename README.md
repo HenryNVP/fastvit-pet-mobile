@@ -1,76 +1,89 @@
 FastViT Pet Mobile
 ===================
 
-This repository contains a small end‑to‑end setup for running **FastViT** pet classification on desktop and Android:
+End‑to‑end setup for training and deploying **FastViT** models for pet classification on Android devices. This repository extends [Apple's FastViT](https://github.com/apple/ml-fastvit) with custom features for mobile deployment and transfer learning.
+Demo video of the benchmark app is available [here](https://drive.google.com/drive/folders/1UZZX45Nn0P_neb1rYmjt9dAVj5ZWijFA?usp=drive_link).
 
-- Prepare a train/val/test split from the Oxford‑IIIT Pet dataset.
-- Export FastViT models to ONNX for mobile.
-- Run the Android app (`Petclassify`) to classify pet images.
-- Collect and analyze on‑device evaluation logs.
+**What's included:**
+- FastViT model implementations (original + Performer attention variants)
+- Training pipeline with stage freezing for transfer learning
+- Data preparation scripts for Oxford-IIIT Pet dataset
+- Model export to ONNX for mobile deployment
+- Android app (`Petclassify`) for on-device inference and evaluation
+- Log analysis tools for accuracy and latency metrics
 
-Demo video is available [here](https://drive.google.com/drive/folders/1UZZX45Nn0P_neb1rYmjt9dAVj5ZWijFA?usp=sharing).
+**Custom features:**
+- **Performer attention models** (`fastvit_t8_P`, `fastvit_sa12_P`) - Linear attention variants for improved efficiency
+- **Stage freezing** (`--freeze-stages`) - Freeze early layers during transfer learning
 
-## Data preparation
+## Benchmarks
 
-1. **Download raw data**
-   - From repo root:
+On-device performance on Android (Oxford-IIIT Pet dataset, 37 classes):
 
-   ```bash
-   python -m scripts.get_data
-   ```
+| Model | Avg Inference Time | Average FPS | Micro Top-1 | Micro Top-5 | Macro Top-1 | Macro Top-5 |
+|-------|-------------------|-------------|-------------|-------------|-------------|-------------|
+| FastViT T8 | 48.75 ms | 20.5 | 90.15% | 99.13% | 90.12% | 99.14% |
+| FastViT SA12_P (distilled) | 43.43 ms | 23.0 | 90.10% | 99.12% | 90.18% | 99.14% |
 
-   This populates `data/raw` with:
-   - `images/`
-   - `annotations/` (including `list.txt`, `trainval.txt`, `test.txt`)
+**Key Findings:** This project enhances FastViT for mobile deployment by integrating **Performer attention** (reducing attention complexity from O(N²) to O(N)) and **knowledge distillation**. The distilled FastViT SA12_P model achieves comparable accuracy to FastViT T8 while reducing latency by ~5ms and increasing FPS by ~2.5, despite having more parameters. These optimizations demonstrate that attention mechanism improvements and distillation can accelerate larger ViT-based models for real-time mobile and edge deployment.
 
-2. **Create train / val / test splits**
+## Quick Start
 
-   ```bash
-   python -m scripts.split_dataset
-   ```
+### 1. Prepare data
+```bash
+python -m scripts.get_data
+python -m scripts.split_dataset
+python -m scripts.create_test_app
+```
 
-   This creates:
-   - `data/train/`, `data/validation/`, `data/test/` with resized \(256 × 256\) JPEGs
-   - CSV label files:
-     - `data/train_labels.csv`
-     - `data/val_labels.csv`
-     - `data/test_labels.csv`
+### 2. Prepare model
+- Copy `model/t8/fastvit.onnx` to `Petclassify/app/src/main/assets/fastvit.onnx`
 
-   Split logic:
-   - Train: all images from `annotations/trainval.txt`
-   - Val/Test: images from `annotations/test.txt`, split 50/50 per class (deterministic).
+### 3. Transfer test data to device
+```bash
+adb push data/test_app /storage/emulated/0/Download/
+```
 
-3. **Create flat test set for Android app**
+### 4. Run app
+- Open `Petclassify/` in Android Studio
+- Run on device/emulator
+- Grant "All files access" permission when prompted
 
-   ```bash
-   python -m scripts.create_test_app
-   ```
-
-   This creates:
-   - `data/test_app/images/` – **all test images in a single folder** (no class subdirs).
-   - `data/test_app/test.txt` – annotation file (no header) with lines:
-
-   ```text
-   image_name class_id species breed_id
-   ```
-
-   There are **1837** entries matching the prepared test split.  
-   You can optionally compress it for transfer to a phone:
-
-   ```powershell
-   Compress-Archive -Path '.\data\test_app' -DestinationPath '.\data\test_app.zip' -Force
-   ```
+### 5. Analyze results
+```bash
+adb logcat -s EVAL_RESULT > results.txt
+python -m scripts.analyze_logs results.txt
+```
 
 
-## Models
+## Custom Features
 
-Pre‑exported ONNX models live under `model/`:
+### Performer Attention Models
+Linear attention variants using `performer-pytorch` for improved efficiency:
+- `fastvit_t8_P` - Performer variant of T8
+- `fastvit_sa12_P` - Performer variant of SA12
 
-- `model/model.onnx` – default model.
-- `model/t8/fastvit.onnx` – FastViT model for TensorFlow Lite / Android (T8 variant).
-- `model/performer/fastvit.onnx` – FastViT Performer model.
+**Usage:**
+```bash
+pip install performer-pytorch
+python -m fastvit.train data --model fastvit_t8_P --num-classes 37
+```
 
-You can re‑export from the training code using:
+### Stage Freezing for Transfer Learning
+Freeze early model stages while training classification head:
+
+```bash
+python -m fastvit.train data \
+    --model fastvit_sa12_P \
+    --resume checkpoint.pth.tar \
+    --finetune \
+    --freeze-stages 0 1 2 \
+    --num-classes 37
+```
+
+The `--freeze-stages` argument accepts stage indices (0-indexed). Classification head is always trainable.
+
+## Export models
 
 ```bash
 python -m fastvit.export_model
@@ -78,55 +91,7 @@ python -m scripts.export_models
 ```
 
 
-## Android app (Petclassify)
-
-The Android demo app lives in the `Petclassify/` directory.
-
-- Open `Petclassify` in Android Studio.
-- Ensure the model assets (ONNX / TFLite or split `.data`) are correctly referenced in the app module.
-- Deploy to a device or emulator.
-- The app will:
-  - Load the FastViT model.
-  - Run classification for images from `test_app/images` (or camera/gallery).
-  - Log evaluation lines via Logcat.
-
-Log format (per image):
-
-```text
-2025-12-17 21:08:55.715  6434-6452  EVAL_RESULT  com.example.petclassify  D  0,48.3934,0,5,27,33,24
-```
-
-which encodes:
-
-```text
-true_label,inference_time_ms,pred_1,pred_2,pred_3,pred_4,pred_5
-```
-
-Collect these logs into a text file, e.g. `results/t8-emulator.txt`.
-
-
-## Evaluating logs
-
-Use `scripts/analyze_logs.py` to parse Android Logcat outputs and compute accuracy / latency metrics.
-
-### Basic usage
-
-From repo root (with venv activated):
-
-```bash
-python -m scripts.analyze_logs results/t8-emulator.txt
-```
-
-The script:
-- Extracts all `EVAL_RESULT` lines.
-- Parses true label, inference time, and top‑5 predictions.
-- Computes:
-  - Total images
-  - Average inference time
-  - **Micro** top‑1 and top‑5 accuracy
-  - **Macro** top‑1 and top‑5 accuracy
-
-
 ## License
-MIT
+
+This project is licensed under MIT. However, the `fastvit/` directory contains code from [Apple's FastViT](https://github.com/apple/ml-fastvit), which is licensed under Apple's proprietary license. See [`fastvit/LICENSE`](fastvit/LICENSE) for details.
 
