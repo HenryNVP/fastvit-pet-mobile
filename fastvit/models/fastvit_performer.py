@@ -145,6 +145,8 @@ class MHSA(nn.Module):
         self.dim = dim
 
         # Use lucidrains' Performer SelfAttention
+        # Note: PerformerSelfAttention already includes output projection (to_out)
+        # So we don't need an additional projection layer here
         self.attn = PerformerSelfAttention(
             dim=dim,
             heads=self.num_heads,
@@ -154,8 +156,8 @@ class MHSA(nn.Module):
             qkv_bias=qkv_bias,
         )
 
-        # Optional output projection (same as original)
-        self.proj = nn.Linear(dim, dim)
+        # PerformerSelfAttention already has output projection, so we only need dropout
+        # This matches the original MHSA structure where proj_drop is applied after projection
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -173,10 +175,10 @@ class MHSA(nn.Module):
             raise ValueError(f"MHSA expects 3D or 4D input, got shape {orig_shape}")
 
         # Performer expects (B, N, dim)
+        # PerformerSelfAttention already includes output projection internally
         x = self.attn(x)  # (B, N, dim)
-
-        # Final projection like in your original MHSA
-        x = self.proj(x)
+        
+        # Apply dropout (PerformerSelfAttention handles projection, we just add dropout)
         x = self.proj_drop(x)
 
         # Restore to 4D if input was 4D

@@ -1,11 +1,13 @@
 torch
 torchvision
 torchaudio
-
+performer-pytorch
 timm
 numpy
 scipy
 matplotlib
 Pillow
 PyYAML
+onnx
 onnxruntime
+onnxscript
