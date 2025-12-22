@@ -1019,6 +1019,7 @@ def main():
 
     random_seed(args.seed, args.rank)
 
+    # Create model without checkpoint_path to handle architecture mismatches manually
     model = create_model(
         args.model,
         pretrained=args.pretrained,
@@ -1032,8 +1033,65 @@ def main():
         bn_momentum=args.bn_momentum,
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
-        checkpoint_path=args.initial_checkpoint,
     )
+    
+    # Load initial checkpoint manually to handle architecture mismatches (e.g., sa12 -> sa12_P)
+    if args.initial_checkpoint:
+        if args.local_rank == 0:
+            _logger.info(f"Loading initial checkpoint from {args.initial_checkpoint}")
+        # Try weights_only=True first (safer), fallback to False if it fails
+        try:
+            checkpoint = torch.load(args.initial_checkpoint, map_location="cpu", weights_only=True)
+        except (pickle.UnpicklingError, TypeError) as e:
+            if "weights_only" in str(e) or "WeightsUnpickler" in str(e):
+                checkpoint = torch.load(args.initial_checkpoint, map_location="cpu", weights_only=False)
+            else:
+                raise
+        
+        # Handle different checkpoint formats
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+        
+        # Filter out keys that don't exist or have shape mismatches
+        # (e.g., standard attention -> Performer attention, different num_classes)
+        model_state_dict = model.state_dict()
+        filtered_state_dict = {}
+        skipped_keys = []
+        for key, value in state_dict.items():
+            if key in model_state_dict:
+                # Check if shapes match
+                if model_state_dict[key].shape == value.shape:
+                    filtered_state_dict[key] = value
+                else:
+                    skipped_keys.append(f"{key} (shape mismatch: {value.shape} -> {model_state_dict[key].shape})")
+            else:
+                # Key not in model, skip it (e.g., attention layer differences)
+                skipped_keys.append(f"{key} (not in model)")
+        
+        # Load with strict=False to handle mismatched keys
+        missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
+        if args.local_rank == 0:
+            if skipped_keys:
+                _logger.info(f"Skipped {len(skipped_keys)} keys when loading initial checkpoint (architecture mismatch or shape differences)")
+                if len(skipped_keys) <= 10:
+                    for key in skipped_keys:
+                        _logger.info(f"  - {key}")
+                else:
+                    for key in skipped_keys[:5]:
+                        _logger.info(f"  - {key}")
+                    _logger.info(f"  ... and {len(skipped_keys) - 5} more")
+            if missing_keys:
+                _logger.info(f"Missing {len(missing_keys)} keys (will use random initialization): {missing_keys[:5]}...")
+                # Check if missing keys are attention-related (Performer attention)
+                attention_keys = [k for k in missing_keys if 'token_mixer' in k or 'attn' in k]
+                if attention_keys:
+                    _logger.info(f"  Note: {len(attention_keys)} attention-related keys will be randomly initialized")
+                    _logger.info(f"  This is expected when loading standard attention weights into Performer attention")
+            _logger.info(f"Loaded {len(filtered_state_dict)}/{len(state_dict)} weights from initial checkpoint")
     if args.num_classes is None:
         assert hasattr(
             model, "num_classes"
@@ -1278,7 +1336,39 @@ def main():
             state_dict = checkpoint["model"]
         else:
             state_dict = checkpoint
-        teacher_model.load_state_dict(state_dict)
+        
+        # Filter out keys that don't exist or have shape mismatches
+        # (e.g., training-mode multi-branch keys when model is in inference mode)
+        teacher_model_state_dict = teacher_model.state_dict()
+        filtered_state_dict = {}
+        skipped_keys = []
+        for key, value in state_dict.items():
+            if key in teacher_model_state_dict:
+                # Check if shapes match
+                if teacher_model_state_dict[key].shape == value.shape:
+                    filtered_state_dict[key] = value
+                else:
+                    skipped_keys.append(f"{key} (shape mismatch: {value.shape} -> {teacher_model_state_dict[key].shape})")
+            else:
+                # Key not in model, skip it (e.g., training-mode keys)
+                skipped_keys.append(f"{key} (not in model)")
+        
+        # Load with strict=False to handle mismatched keys
+        missing_keys, unexpected_keys = teacher_model.load_state_dict(filtered_state_dict, strict=False)
+        if args.local_rank == 0:
+            if skipped_keys:
+                _logger.info(f"Skipped {len(skipped_keys)} keys when loading teacher model")
+                if len(skipped_keys) <= 10:
+                    for key in skipped_keys:
+                        _logger.info(f"  - {key}")
+                else:
+                    for key in skipped_keys[:5]:
+                        _logger.info(f"  - {key}")
+                    _logger.info(f"  ... and {len(skipped_keys) - 5} more")
+            if missing_keys:
+                _logger.warning(f"Teacher model missing {len(missing_keys)} keys: {missing_keys[:5]}...")
+            _logger.info(f"Loaded {len(filtered_state_dict)}/{len(state_dict)} weights into teacher model")
+        
         teacher_model.cuda()
         teacher_model.eval()
 

@@ -245,6 +245,7 @@ parser.add_argument(
     action="store_true",
     help="use ema version of weights if present",
 )
+parser.add_argument("--local_rank", default=0, type=int, help="local rank for distributed training")
 parser.add_argument(
     "--torchscript",
     dest="torchscript",
