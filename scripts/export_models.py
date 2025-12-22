@@ -17,7 +17,7 @@ from fastvit.models.modules.mobileone import reparameterize_model
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export a trained FastViT model to TorchScript and ONNX formats."
+        description="Export a trained FastViT model to ONNX format."
     )
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to FastViT checkpoint.")
     parser.add_argument("--model", type=str, default="fastvit_t8", help="FastViT model name (e.g., fastvit_t8, fastvit_s12).")
@@ -49,8 +49,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--use-ema", action="store_true", help="Use EMA model weights if available in checkpoint.")
     parser.add_argument("--reparameterize", action="store_true", help="Reparameterize model before export (recommended for inference).")
-    parser.add_argument("--skip-torchscript", action="store_true", help="Skip TorchScript export (default: export both formats).")
-    parser.add_argument("--skip-onnx", action="store_true", help="Skip ONNX export (default: export both formats).")
+    
+    # Quantization arguments
+    parser.add_argument("--quantize", action="store_true", help="Enable INT8 quantization for ONNX model (uses dynamic quantization, no calibration data required).")
     return parser.parse_args()
 
 
@@ -118,18 +119,6 @@ def load_fastvit_checkpoint(
     return model
 
 
-def export_torchscript(model: torch.nn.Module, dummy_input: torch.Tensor, path: Path) -> None:
-    try:
-        scripted = torch.jit.script(model)
-    except Exception as exc:  # pragma: no cover - fallback path
-        print(f"[warn] torch.jit.script failed ({exc}); falling back to trace.")
-        scripted = torch.jit.trace(model, dummy_input)
-    scripted.save(path)
-    print(f"Saved TorchScript model to {path}")
-
-
-
-
 def make_seblock_onnx_compatible(model: torch.nn.Module):
     """Temporarily replace SEBlock forward methods with ONNX-compatible versions.
     
@@ -178,7 +167,17 @@ def export_onnx(
     dummy_input: torch.Tensor,
     path: Path,
     opset: int,
+    quantize: bool = False,
 ) -> None:
+    """Export model to ONNX format, optionally with INT8 quantization.
+    
+    Args:
+        model: Model to export
+        dummy_input: Example input tensor
+        path: Output path for ONNX model
+        opset: ONNX opset version
+        quantize: If True, apply dynamic INT8 quantization using ONNX Runtime
+    """
     # Check if ONNX is installed
     try:
         import onnx  # type: ignore
@@ -192,10 +191,16 @@ def export_onnx(
     original_forwards = make_seblock_onnx_compatible(model)
     
     try:
+        # Export FP32 ONNX first
+        fp32_path = path
+        if quantize:
+            # For quantization, export to temporary FP32 file first
+            fp32_path = path.parent / f"{path.stem}_fp32.onnx"
+        
         torch.onnx.export(
             model,
             dummy_input,
-            path,
+            fp32_path,
             export_params=True,
             opset_version=opset,
             do_constant_folding=True,
@@ -203,7 +208,32 @@ def export_onnx(
             output_names=["logits"],
             dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
         )
-        print(f"Saved ONNX model to {path}")
+        print(f"Saved FP32 ONNX model to {fp32_path}")
+        
+        # Apply quantization if requested
+        if quantize:
+            try:
+                from onnxruntime.quantization import quantize_dynamic, QuantType
+            except ImportError:
+                raise ImportError(
+                    "ONNX Runtime quantization requires onnxruntime. "
+                    "Install with: pip install onnxruntime"
+                )
+            
+            print("Applying dynamic INT8 quantization to ONNX model...")
+            quantize_dynamic(
+                model_input=str(fp32_path),
+                model_output=str(path),
+                weight_type=QuantType.QInt8,
+            )
+            print(f"Saved quantized INT8 ONNX model to {path}")
+            
+            # Optionally remove temporary FP32 file
+            try:
+                fp32_path.unlink()
+                print(f"Removed temporary FP32 model: {fp32_path}")
+            except Exception as e:
+                print(f"Warning: Could not remove temporary FP32 model {fp32_path}: {e}")
     finally:
         # Restore original forward methods
         restore_seblock_forwards(model, original_forwards)
@@ -221,6 +251,9 @@ def main() -> int:
     print(f"Using device: {device}")
     print(f"Model: {args.model}, Input size: {args.input_size}, Num classes: {args.num_classes}")
     print(f"Checkpoint: {args.checkpoint}")
+    
+    if args.quantize:
+        print("Quantization enabled - will apply INT8 dynamic quantization to ONNX model")
     
     # Load model
     print("\n--- Loading model ---")
@@ -251,36 +284,28 @@ def main() -> int:
     
     input_size = args.input_size
     
-    # TorchScript export
-    if not args.skip_torchscript:
-        print(f"\n--- Exporting TorchScript model ---")
-        # For FastViT, we can export directly without center crop wrapper
-        # since the model expects the input size directly
-        ts_dummy = torch.randn(1, 3, input_size, input_size, device=device)
-        ts_path = output_dir / "model_scripted.pt"
-        try:
-            export_torchscript(model, ts_dummy, ts_path)
-        except Exception as e:
-            print(f"Error exporting TorchScript: {e}")
-            print("Trying with trace method...")
-            try:
-                scripted = torch.jit.trace(model, ts_dummy)
-                scripted.save(ts_path)
-                print(f"Saved TorchScript model to {ts_path}")
-            except Exception as e2:
-                print(f"Failed to export TorchScript: {e2}")
-    
     # ONNX export
-    if not args.skip_onnx:
-        print(f"\n--- Exporting ONNX model ---")
-        onnx_dummy = torch.randn(1, 3, input_size, input_size, device=device)
+    print(f"\n--- Exporting ONNX model ---")
+    onnx_dummy = torch.randn(1, 3, input_size, input_size, device=device)
+    
+    # Determine output filename based on quantization
+    if args.quantize:
+        onnx_path = output_dir / "model_int8.onnx"
+    else:
         onnx_path = output_dir / "model.onnx"
-        try:
-            export_onnx(model, onnx_dummy, onnx_path, args.onnx_opset)
-        except Exception as e:
-            print(f"Error exporting ONNX: {e}")
-            import traceback
-            traceback.print_exc()
+    
+    try:
+        export_onnx(
+            model,
+            onnx_dummy,
+            onnx_path,
+            args.onnx_opset,
+            quantize=args.quantize,
+        )
+    except Exception as e:
+        print(f"Error exporting ONNX: {e}")
+        import traceback
+        traceback.print_exc()
     
     print(f"\nExport complete! Files saved to: {output_dir}")
     return 0
