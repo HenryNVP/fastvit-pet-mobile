@@ -657,6 +657,12 @@ parser.add_argument(
     help="Enable tracking moving average of model weights",
 )
 parser.add_argument(
+    "--no-model-ema",
+    dest="model_ema",
+    action="store_false",
+    help="Disable tracking moving average of model weights",
+)
+parser.add_argument(
     "--model-ema-force-cpu",
     action="store_true",
     default=False,
