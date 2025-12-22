@@ -1463,6 +1463,10 @@ def main():
                 model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast
             )
 
+            # Store regular model metrics for checkpoint selection
+            # (EMA metrics may be poor during finetuning, so use regular model for best checkpoint)
+            checkpoint_metrics = eval_metrics
+
             if model_ema is not None and not args.model_ema_force_cpu:
                 if args.distributed and args.dist_bn in ("broadcast", "reduce"):
                     distribute_bn(model_ema, args.world_size, args.dist_bn == "reduce")
@@ -1474,11 +1478,12 @@ def main():
                     amp_autocast=amp_autocast,
                     log_suffix=" (EMA)",
                 )
+                # Keep EMA metrics for logging/summary, but don't overwrite checkpoint metrics
                 eval_metrics = ema_eval_metrics
 
             if lr_scheduler is not None:
-                # step LR for next epoch
-                lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
+                # step LR for next epoch (use regular model metrics for LR scheduling)
+                lr_scheduler.step(epoch + 1, checkpoint_metrics[eval_metric])
 
             if output_dir is not None:
                 update_summary(
@@ -1491,8 +1496,8 @@ def main():
                 )
 
             if saver is not None:
-                # save proper checkpoint with eval metric
-                save_metric = eval_metrics[eval_metric]
+                # save proper checkpoint with eval metric (use regular model, not EMA)
+                save_metric = checkpoint_metrics[eval_metric]
                 best_metric, best_epoch = saver.save_checkpoint(
                     epoch, metric=save_metric
                 )

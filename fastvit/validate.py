@@ -328,7 +328,54 @@ def validate(args):
         args.num_classes = model.num_classes
 
     if args.checkpoint:
-        load_checkpoint(model, args.checkpoint, args.use_ema)
+        # Load checkpoint with proper handling of unexpected keys
+        # (checkpoint may have training-mode keys that don't exist in inference mode)
+        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        
+        # Handle different checkpoint formats
+        if args.use_ema and "model_ema" in checkpoint:
+            state_dict = checkpoint["model_ema"]
+        elif "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        elif "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+        
+        # Filter out keys that don't exist in current model
+        # (e.g., training-mode multi-branch keys when model is in inference mode)
+        model_state_dict = model.state_dict()
+        filtered_state_dict = {}
+        skipped_keys = []
+        for key, value in state_dict.items():
+            if key in model_state_dict:
+                # Check if shapes match
+                if model_state_dict[key].shape == value.shape:
+                    filtered_state_dict[key] = value
+                else:
+                    skipped_keys.append(f"{key} (shape mismatch: {value.shape} -> {model_state_dict[key].shape})")
+            else:
+                # Key not in model, skip it (e.g., training-mode keys)
+                skipped_keys.append(f"{key} (not in model)")
+        
+        # Load with strict=False to handle unexpected keys
+        missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
+        
+        if skipped_keys and args.local_rank == 0:
+            _logger.info(f"Skipped {len(skipped_keys)} keys when loading checkpoint (training-mode keys or shape mismatches)")
+            if len(skipped_keys) <= 10:
+                for key in skipped_keys:
+                    _logger.info(f"  - {key}")
+            else:
+                for key in skipped_keys[:5]:
+                    _logger.info(f"  - {key}")
+                _logger.info(f"  ... and {len(skipped_keys) - 5} more")
+        
+        if missing_keys and args.local_rank == 0:
+            _logger.warning(f"Missing {len(missing_keys)} keys when loading checkpoint: {missing_keys[:5]}...")
+        
+        if args.local_rank == 0:
+            _logger.info(f"Loaded {len(filtered_state_dict)}/{len(state_dict)} weights from checkpoint")
 
     # Reparameterize model
     model.eval()
