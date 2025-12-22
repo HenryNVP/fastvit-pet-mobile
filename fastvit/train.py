@@ -34,6 +34,7 @@ import os
 import glob
 import math
 import logging
+import pickle
 from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
@@ -1138,7 +1139,15 @@ def main():
                 "Finetune option selected, not loading optimizer state and loss_scaler"
             )
             # Handle different checkpoint formats (state_dict, model, or direct state_dict)
-            checkpoint = torch.load(args.resume, map_location="cpu")
+            # Try weights_only=True first (safer), fallback to False if it fails (for older checkpoints)
+            try:
+                checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
+            except (pickle.UnpicklingError, TypeError) as e:
+                if "weights_only" in str(e) or "WeightsUnpickler" in str(e):
+                    # Checkpoint contains non-weight objects, use weights_only=False
+                    checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+                else:
+                    raise
             if "state_dict" in checkpoint:
                 state_dict = checkpoint["state_dict"]
             elif "model" in checkpoint:
