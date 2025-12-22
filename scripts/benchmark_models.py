@@ -26,7 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default="fastvit_t8", help="FastViT model name (e.g., fastvit_t8, fastvit_s12).")
     parser.add_argument("--num-classes", type=int, default=1000, help="Number of classes (default: 1000 for ImageNet).")
     parser.add_argument("--input-size", type=int, default=256, help="Input image size (default: 256).")
-    parser.add_argument("--torchscript", type=Path, default=None, help="Path to TorchScript model.")
     parser.add_argument("--onnx", type=Path, default=None, help="Path to ONNX model.")
     parser.add_argument("--exports-dir", type=Path, default=Path("exports"), help="Base directory where exported models are stored (default: exports).")
     parser.add_argument("--subdir", type=str, default=None, help="Subdirectory within exports-dir (e.g., 'teacher', 'student'). If not specified, looks directly in exports-dir.")
@@ -57,21 +56,40 @@ def benchmark_pytorch(model: torch.nn.Module, dummy: torch.Tensor, warmup: int, 
     return {"fps": fps, "latency": latency, "total_time": elapsed}
 
 
-def benchmark_torchscript(path: Path, dummy: torch.Tensor, device: torch.device, warmup: int, runs: int) -> Dict[str, float]:
-    model = torch.jit.load(path, map_location=device)
-    model.eval()
-    return benchmark_pytorch(model, dummy, warmup, runs)
-
-
 def benchmark_onnx(path: Path, dummy: np.ndarray, warmup: int, runs: int) -> Dict[str, float]:
-    sess = ort.InferenceSession(path.as_posix(), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+    # Try CUDA first, fallback to CPU
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    sess = ort.InferenceSession(path.as_posix(), providers=providers)
+    
+    # Check which provider is actually being used
+    actual_providers = sess.get_providers()
+    if "CUDAExecutionProvider" in actual_providers:
+        print(f"  Using CUDAExecutionProvider for ONNX inference")
+        import torch
+        if torch.cuda.is_available():
+            # Use CUDA synchronization for accurate timing
+            sync_func = torch.cuda.synchronize
+        else:
+            sync_func = lambda: None
+    else:
+        print(f"  WARNING: Using CPUExecutionProvider (much slower!). Install onnxruntime-gpu for GPU acceleration.")
+        sync_func = lambda: None
+    
     inputs = {sess.get_inputs()[0].name: dummy}
+    
+    # Warmup
     for _ in range(warmup):
         sess.run(None, inputs)
+        sync_func()
+    
+    # Timed runs
+    sync_func()  # Sync before timing
     start = time.time()
     for _ in range(runs):
         sess.run(None, inputs)
+    sync_func()  # Sync after all runs
     elapsed = time.time() - start
+    
     fps = runs * dummy.shape[0] / elapsed
     latency = elapsed / runs
     return {"fps": fps, "latency": latency, "total_time": elapsed}
@@ -185,19 +203,6 @@ def main() -> int:
     else:
         exports_base = ROOT_DIR / args.exports_dir
     
-    # TorchScript
-    if args.torchscript:
-        ts_path = args.torchscript
-    else:
-        ts_path = exports_base / "model_scripted.pt"
-    
-    if ts_path.exists():
-        print(f"\n--- Benchmarking TorchScript model: {ts_path} ---")
-        results["torchscript"] = benchmark_torchscript(ts_path, dummy, device, args.warmup, args.runs)
-    else:
-        print(f"\n[warn] TorchScript model not found at {ts_path}. Skipping.")
-        print(f"      (Checked: {ts_path.absolute()})")
-
     # ONNX (expects same input size as model)
     if args.onnx:
         onnx_path = args.onnx
