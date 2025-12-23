@@ -21,20 +21,19 @@ On-device performance on Android Legion Phone Duel 2 (Oxford-IIIT Pet dataset, 3
 
 | Model / Configuration | Avg Inference Time | Top-1 Accuracy | Top-5 Accuracy |
 |----------------------|-------------------|----------------|---------------|
-| sa12_fp16 | 40.61 ms | 90.15% | 99.13% |
+| sa12_fp16 | 39.22 ms | 90.15% | 99.13% |
 | sa12_fp32 | 190.23 ms | 90.15% | 99.13% |
-| sa12P_fp16 | 39.82 ms | 90.15% | 99.13% |
-| sa12P_fp32 | 195.01 ms | 90.15% | 99.13% |
+| sa12P_fp16 | 39.50 ms | 90.15% | 99.13% |
+| sa12P_fp32 | 189.99 ms | 90.15% | 99.13% |
 
-**Key Findings:** This project enhances FastViT for mobile deployment by integrating **Performer attention** (reducing attention complexity from $O(N^2)$ to $O(N)$) and knowledge distillation.The distilled FastViT SA12_P model (quantized to FP16) achieves the lowest latency of 39.82 ms, outperforming the baseline FastViT SA12 FP16 (40.61 ms). This configuration restores the expected performance gains from quantization, where the FP16 model is significantly faster (~4.9x) than its FP32 counterpart. While the latency reduction compared to the baseline is modest (~0.8 ms), the SA12_P model maintains an identical Top-1 accuracy of 90.15%, demonstrating that Performer attention can be effectively quantized for mobile edge devices without accuracy loss.
+**Key Findings:** This project evaluates FastViT for mobile deployment by comparing standard Multi-Head Self-Attention (MHSA) against **Performer attention** (which theoretically reduces complexity from $O(N^2)$ to $O(N)$).The results indicate that Performer attention performs almost identically to MHSA on this architecture. This suggests that for the short sequence lengths ($N$) typical in these model stages, the asymptotic advantage of linear attention does not translate into a practical reduction in inference time compared to standard attention.Despite the lack of speedup from the architectural change, both models demonstrate excellent quantization efficiency, with FP16 configurations running approximately 4.8x faster than their FP32 counterparts while maintaining an identical Top-1 accuracy.
 
 ## Quick Start
 
 ### 1. Prepare data
 ```bash
-python -m scripts.get_data
-python -m scripts.split_dataset
-python -m scripts.create_test_app
+python scripts/get_data.py
+python scripts/split_dataset.py
 ```
 
 ### 2. Prepare model
@@ -62,21 +61,70 @@ Linear attention variants using `performer-pytorch` for improved efficiency:
 Freeze early model stages while training classification head:
 
 ```bash
-python -m fastvit.train data \
-    --model fastvit_sa12_P \
-    --resume checkpoint.pth.tar \
+python fastvit/train.py data \
+    --model fastvit_sa12 \
+    --resume fastvit_sa12.pth.tar \
     --finetune \
     --freeze-stages 0 1 2 \
-    --num-classes 37
+    --num-classes 37 \
+    -b 192 --lr 1e-3 \
+    --epochs 30 \
+    --native-amp \
+    --no-model-ema \
+    --output ./output \
+    --input-size 3 256 256 \
+    --drop-path 0.1
 ```
 
 The `--freeze-stages` argument accepts stage indices (0-indexed). Classification head is always trainable.
 
-## Export models
+### Knowledge Distillation
+Train Performer attention models with knowledge distillation from a teacher model:
 
 ```bash
-python -m fastvit.export_model
-python -m scripts.export_models
+python fastvit/train.py data \
+    --model fastvit_sa12_P \
+    --initial-checkpoint checkpoint.pth.tar \
+    --finetune \
+    --num-classes 37 \
+    -b 128 \
+    --lr 1e-4 \
+    --clip-grad 1.0 \
+    --epochs 20 \
+    --output ./output \
+    --input-size 3 256 256 \
+    --teacher-model fastvit_sa12 \
+    --teacher-path teacher_checkpoint.pth.tar \
+    --distillation-type soft \
+    --distillation-tau 3.0 \
+    --distillation-alpha 0.5 \
+    --no-model-ema \
+    --drop-path 0.1
+```
+
+## Export models
+
+Export models to ONNX format for mobile deployment:
+
+```bash
+# Export FP32 model
+python scripts/export_models.py \
+    --checkpoint checkpoint.pth.tar \
+    --model fastvit_sa12 \
+    --num-classes 37 \
+    --input-size 256 \
+    --reparameterize \
+    --output-dir exports/fastvit_sa12-fp32
+
+# Export FP16 quantized model
+python scripts/export_models.py \
+    --checkpoint checkpoint.pth.tar \
+    --model fastvit_sa12 \
+    --num-classes 37 \
+    --input-size 256 \
+    --reparameterize \
+    --fp16 \
+    --output-dir exports/fastvit_sa12_fp16
 ```
 
 
