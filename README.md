@@ -12,7 +12,7 @@ End‑to‑end setup for training and deploying **FastViT** models for pet class
 - Log analysis tools for accuracy and latency metrics
 
 **Custom features:**
-- **Performer attention models** (`fastvit_t8_P`, `fastvit_sa12_P`) - Linear attention variants for improved efficiency
+- **Performer attention models** (`fastvit_sa12_P`) - Linear attention variants for improved efficiency
 - **Stage freezing** (`--freeze-stages`) - Freeze early layers during transfer learning
 
 ## Benchmarks
@@ -38,7 +38,7 @@ python -m scripts.create_test_app
 ```
 
 ### 2. Prepare model
-- Copy `model/t8/fastvit.onnx` to `Petclassify/app/src/main/assets/fastvit.onnx`
+- Prepare model `fasvit.onnx` and `model.onnx.data` in `Petclassify/app/src/main/assets/`
 
 ### 3. Transfer test data to device
 ```bash
@@ -49,26 +49,14 @@ adb push data/test_app /storage/emulated/0/Download/
 - Open `Petclassify/` in Android Studio
 - Run on device/emulator
 - Grant "All files access" permission when prompted
-
-### 5. Analyze results
-```bash
-adb logcat -s EVAL_RESULT > results.txt
-python -m scripts.analyze_logs results.txt
-```
+- Analyze results in Log Cat
 
 
 ## Custom Features
 
 ### Performer Attention Models
 Linear attention variants using `performer-pytorch` for improved efficiency:
-- `fastvit_t8_P` - Performer variant of T8
 - `fastvit_sa12_P` - Performer variant of SA12
-
-**Usage:**
-```bash
-pip install performer-pytorch
-python -m fastvit.train data --model fastvit_t8_P --num-classes 37
-```
 
 ### Stage Freezing for Transfer Learning
 Freeze early model stages while training classification head:
