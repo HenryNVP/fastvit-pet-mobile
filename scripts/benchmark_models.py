@@ -26,9 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default="fastvit_t8", help="FastViT model name (e.g., fastvit_t8, fastvit_s12).")
     parser.add_argument("--num-classes", type=int, default=1000, help="Number of classes (default: 1000 for ImageNet).")
     parser.add_argument("--input-size", type=int, default=256, help="Input image size (default: 256).")
-    parser.add_argument("--onnx", type=Path, default=None, help="Path to ONNX model.")
+    parser.add_argument("--onnx", type=Path, default=None, help="Path to ONNX model (single file).")
+    parser.add_argument("--onnx-fp16", type=Path, default=None, help="Path to FP16 ONNX model.")
     parser.add_argument("--exports-dir", type=Path, default=Path("exports"), help="Base directory where exported models are stored (default: exports).")
     parser.add_argument("--subdir", type=str, default=None, help="Subdirectory within exports-dir (e.g., 'teacher', 'student'). If not specified, looks directly in exports-dir.")
+    parser.add_argument("--auto-find-onnx", action="store_true", help="Automatically find model.onnx and model_fp16.onnx in exports directory.")
     parser.add_argument("--device", type=str, default=None, help="Device (default: cuda if available, else cpu).")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations.")
     parser.add_argument("--runs", type=int, default=100, help="Timed iterations.")
@@ -75,7 +77,23 @@ def benchmark_onnx(path: Path, dummy: np.ndarray, warmup: int, runs: int) -> Dic
         print(f"  WARNING: Using CPUExecutionProvider (much slower!). Install onnxruntime-gpu for GPU acceleration.")
         sync_func = lambda: None
     
-    inputs = {sess.get_inputs()[0].name: dummy}
+    # Get input type from ONNX model and convert dummy input accordingly
+    input_meta = sess.get_inputs()[0]
+    expected_type = input_meta.type
+    
+    # Convert dummy input to match ONNX model's expected type
+    if 'float16' in str(expected_type) or 'tensor(float16)' in str(expected_type):
+        # Model expects FP16, convert input to float16
+        dummy = dummy.astype(np.float16)
+        print(f"  Converting input to float16 to match model precision")
+    elif 'float' in str(expected_type) or 'tensor(float)' in str(expected_type):
+        # Model expects FP32, ensure input is float32
+        dummy = dummy.astype(np.float32)
+    else:
+        # Default to float32
+        dummy = dummy.astype(np.float32)
+    
+    inputs = {input_meta.name: dummy}
     
     # Warmup
     for _ in range(warmup):
@@ -203,19 +221,35 @@ def main() -> int:
     else:
         exports_base = ROOT_DIR / args.exports_dir
     
-    # ONNX (expects same input size as model)
-    if args.onnx:
-        onnx_path = args.onnx
-    else:
-        onnx_path = exports_base / "model.onnx"
+    # ONNX models (expects same input size as model)
+    onnx_models = []
     
-    if onnx_path.exists():
-        print(f"\n--- Benchmarking ONNX model: {onnx_path} ---")
-        dummy_onnx = torch.randn(args.batch_size, 3, input_size, input_size).numpy()
-        results["onnx"] = benchmark_onnx(onnx_path, dummy_onnx, args.warmup, args.runs)
-    else:
-        print(f"\n[warn] ONNX model not found at {onnx_path}. Skipping.")
-        print(f"      (Checked: {onnx_path.absolute()})")
+    # Add explicitly specified ONNX files
+    if args.onnx:
+        onnx_models.append(("onnx_fp32", args.onnx))
+    if args.onnx_fp16:
+        onnx_models.append(("onnx_fp16", args.onnx_fp16))
+    
+    # Auto-find ONNX models if requested
+    if args.auto_find_onnx or (not args.onnx and not args.onnx_fp16):
+        # Try to find model.onnx and model_fp16.onnx
+        fp32_path = exports_base / "model.onnx"
+        fp16_path = exports_base / "model_fp16.onnx"
+        
+        if fp32_path.exists() and not any(name == "onnx_fp32" for name, _ in onnx_models):
+            onnx_models.append(("onnx_fp32", fp32_path))
+        if fp16_path.exists() and not any(name == "onnx_fp16" for name, _ in onnx_models):
+            onnx_models.append(("onnx_fp16", fp16_path))
+    
+    # Benchmark all ONNX models
+    dummy_onnx = torch.randn(args.batch_size, 3, input_size, input_size).numpy()
+    for name, onnx_path in onnx_models:
+        if onnx_path.exists():
+            print(f"\n--- Benchmarking {name}: {onnx_path} ---")
+            results[name] = benchmark_onnx(onnx_path, dummy_onnx, args.warmup, args.runs)
+        else:
+            print(f"\n[warn] ONNX model not found at {onnx_path}. Skipping.")
+            print(f"      (Checked: {onnx_path.absolute()})")
 
     print("\n" + "="*70)
     print("--- Benchmark Results ---")

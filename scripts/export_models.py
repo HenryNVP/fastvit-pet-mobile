@@ -49,9 +49,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--use-ema", action="store_true", help="Use EMA model weights if available in checkpoint.")
     parser.add_argument("--reparameterize", action="store_true", help="Reparameterize model before export (recommended for inference).")
-    
-    # Quantization arguments
-    parser.add_argument("--quantize", action="store_true", help="Enable INT8 quantization for ONNX model (uses dynamic quantization, no calibration data required).")
+    parser.add_argument("--fp16", action="store_true", help="Export ONNX model in FP16 (half precision). Weights and activations will be FP16. Default is FP32.")
     return parser.parse_args()
 
 
@@ -167,16 +165,16 @@ def export_onnx(
     dummy_input: torch.Tensor,
     path: Path,
     opset: int,
-    quantize: bool = False,
+    fp16: bool = False,
 ) -> None:
-    """Export model to ONNX format, optionally with INT8 quantization.
+    """Export model to ONNX format, optionally in FP16 precision.
     
     Args:
         model: Model to export
         dummy_input: Example input tensor
         path: Output path for ONNX model
         opset: ONNX opset version
-        quantize: If True, apply dynamic INT8 quantization using ONNX Runtime
+        fp16: If True, export model in FP16 (half precision), otherwise FP32
     """
     # Check if ONNX is installed
     try:
@@ -191,49 +189,38 @@ def export_onnx(
     original_forwards = make_seblock_onnx_compatible(model)
     
     try:
-        # Export FP32 ONNX first
-        fp32_path = path
-        if quantize:
-            # For quantization, export to temporary FP32 file first
-            fp32_path = path.parent / f"{path.stem}_fp32.onnx"
+        # Determine export precision
+        if fp16:
+            # For FP16, convert model to half precision
+            print("Converting model to FP16 (half precision)...")
+            model_fp16 = model.half()
+            dummy_input_fp16 = dummy_input.half()
+            export_path = path
+            precision_note = "FP16"
+        else:
+            # FP32 export
+            model_fp16 = model
+            dummy_input_fp16 = dummy_input
+            export_path = path
+            precision_note = "FP32"
+        
+        # Use opset 18 to avoid version conversion issues
+        export_opset = max(opset, 18)
+        if export_opset > opset:
+            print(f"Note: Using opset {export_opset} instead of {opset} to avoid conversion issues")
         
         torch.onnx.export(
-            model,
-            dummy_input,
-            fp32_path,
+            model_fp16,
+            dummy_input_fp16,
+            export_path,
             export_params=True,
-            opset_version=opset,
+            opset_version=export_opset,
             do_constant_folding=True,
             input_names=["input"],
             output_names=["logits"],
             dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
         )
-        print(f"Saved FP32 ONNX model to {fp32_path}")
-        
-        # Apply quantization if requested
-        if quantize:
-            try:
-                from onnxruntime.quantization import quantize_dynamic, QuantType
-            except ImportError:
-                raise ImportError(
-                    "ONNX Runtime quantization requires onnxruntime. "
-                    "Install with: pip install onnxruntime"
-                )
-            
-            print("Applying dynamic INT8 quantization to ONNX model...")
-            quantize_dynamic(
-                model_input=str(fp32_path),
-                model_output=str(path),
-                weight_type=QuantType.QInt8,
-            )
-            print(f"Saved quantized INT8 ONNX model to {path}")
-            
-            # Optionally remove temporary FP32 file
-            try:
-                fp32_path.unlink()
-                print(f"Removed temporary FP32 model: {fp32_path}")
-            except Exception as e:
-                print(f"Warning: Could not remove temporary FP32 model {fp32_path}: {e}")
+        print(f"Saved {precision_note} ONNX model to {export_path}")
     finally:
         # Restore original forward methods
         restore_seblock_forwards(model, original_forwards)
@@ -252,8 +239,8 @@ def main() -> int:
     print(f"Model: {args.model}, Input size: {args.input_size}, Num classes: {args.num_classes}")
     print(f"Checkpoint: {args.checkpoint}")
     
-    if args.quantize:
-        print("Quantization enabled - will apply INT8 dynamic quantization to ONNX model")
+    if args.fp16:
+        print("FP16 export enabled - model will be exported in half precision (FP16)")
     
     # Load model
     print("\n--- Loading model ---")
@@ -288,9 +275,9 @@ def main() -> int:
     print(f"\n--- Exporting ONNX model ---")
     onnx_dummy = torch.randn(1, 3, input_size, input_size, device=device)
     
-    # Determine output filename based on quantization
-    if args.quantize:
-        onnx_path = output_dir / "model_int8.onnx"
+    # Determine output filename based on precision
+    if args.fp16:
+        onnx_path = output_dir / "model_fp16.onnx"
     else:
         onnx_path = output_dir / "model.onnx"
     
@@ -300,7 +287,7 @@ def main() -> int:
             onnx_dummy,
             onnx_path,
             args.onnx_opset,
-            quantize=args.quantize,
+            fp16=args.fp16,
         )
     except Exception as e:
         print(f"Error exporting ONNX: {e}")
