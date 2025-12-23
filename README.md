@@ -1,8 +1,7 @@
 FastViT Pet Mobile
 ===================
 
-End‑to‑end setup for training and deploying **FastViT** models for pet classification on Android devices. This repository extends [Apple's FastViT](https://github.com/apple/ml-fastvit) with custom features for mobile deployment and transfer learning.
-Demo video of the benchmark app is available [here](https://drive.google.com/drive/folders/1UZZX45Nn0P_neb1rYmjt9dAVj5ZWijFA?usp=drive_link).
+End‑to‑end setup for training and deploying **FastViT** models for pet classification on Android devices. This repository extends [Apple's FastViT](https://github.com/apple/ml-fastvit) with custom features for mobile deployment and transfer learning. The project integrates **Performer attention** to reduce attention complexity from $O(N^2)$ to $O(N)$, **knowledge distillation** to transfer knowledge from teacher models, and **quantization** (FP16/FP32) to optimize inference speed on mobile devices while maintaining accuracy.
 
 **What's included:**
 - FastViT model implementations (original + Performer attention variants)
@@ -20,12 +19,14 @@ Demo video of the benchmark app is available [here](https://drive.google.com/dri
 
 On-device performance on Android (Oxford-IIIT Pet dataset, 37 classes):
 
-| Model | Avg Inference Time | Average FPS | Micro Top-1 | Micro Top-5 | Macro Top-1 | Macro Top-5 |
-|-------|-------------------|-------------|-------------|-------------|-------------|-------------|
-| FastViT T8 | 48.75 ms | 20.5 | 90.15% | 99.13% | 90.12% | 99.14% |
-| FastViT SA12_P (distilled) | 43.43 ms | 23.0 | 90.10% | 99.12% | 90.18% | 99.14% |
+| Model / Configuration | Avg Inference Time | Top-1 Accuracy | Top-5 Accuracy |
+|----------------------|-------------------|----------------|---------------|
+| sa12_fp16 | 40.61 ms | 90.15% | 99.13% |
+| sa12_fp32 | 190.23 ms | 90.15% | 99.13% |
+| sa12P_fp16 | 39.82 ms | 90.15% | 99.13% |
+| sa12P_fp32 | 195.01 ms | 90.15% | 99.13% |
 
-**Key Findings:** This project enhances FastViT for mobile deployment by integrating **Performer attention** (reducing attention complexity from O(N²) to O(N)) and **knowledge distillation**. The distilled FastViT SA12_P model achieves comparable accuracy to FastViT T8 while reducing latency by ~5ms and increasing FPS by ~2.5, despite having more parameters. These optimizations demonstrate that attention mechanism improvements and distillation can accelerate larger ViT-based models for real-time mobile and edge deployment.
+**Key Findings:** This project enhances FastViT for mobile deployment by integrating **Performer attention** (reducing attention complexity from $O(N^2)$ to $O(N)$) and knowledge distillation.The distilled FastViT SA12_P model (quantized to FP16) achieves the lowest latency of 39.82 ms, outperforming the baseline FastViT SA12 FP16 (40.61 ms). This configuration restores the expected performance gains from quantization, where the FP16 model is significantly faster (~4.9x) than its FP32 counterpart. While the latency reduction compared to the baseline is modest (~0.8 ms), the SA12_P model maintains an identical Top-1 accuracy of 90.15%, demonstrating that Performer attention can be effectively quantized for mobile edge devices without accuracy loss.
 
 ## Quick Start
 

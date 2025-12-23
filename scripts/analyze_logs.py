@@ -1,30 +1,66 @@
 import pandas as pd
 import numpy as np
 import os
+import sys
+import argparse
+import re
 
-LOG_FILE = "evaluation_logs.txt"
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
 
-def analyze_pet_evaluation_logs():
+def analyze_pet_evaluation_logs(log_file):
     """
     Parses the evaluation logs from the Android app and calculates key
-    performance metrics for the pet classification model.    The script expects log lines in the following format:
-    EVAL_RESULT: true_label,inference_time_ms,pred_1,pred_2,pred_3,pred_4,pred_5
+    performance metrics for the pet classification model.
+    
+    The script expects log lines in one of the following formats:
+    - EVAL_RESULT: true_label,inference_time_ms,pred_1,pred_2,pred_3,pred_4,pred_5
+    - EVAL_RESULT ... D  true_label,inference_time_ms,pred_1,pred_2,pred_3,pred_4,pred_5
     """
-    if not os.path.exists(LOG_FILE):
-        print(f"❌ Error: Log file not found at '{LOG_FILE}'")
+    if not os.path.exists(log_file):
+        print(f"❌ Error: Log file not found at '{log_file}'")
         print("Please make sure you have saved your Logcat output to this file.")
         return
 
     records = []
-    print(f"📄 Reading log file: {LOG_FILE}...")
-    with open(LOG_FILE, 'r', encoding='utf-8') as f:
+    print(f"📄 Reading log file: {log_file}...")
+    with open(log_file, 'r', encoding='utf-8') as f:
         for line in f:
             # Find the start of our specific log message to ignore other noise
             if "EVAL_RESULT" in line:
                 try:
-                    # Clean up the line and extract the comma-separated data
-                    # Example: "D  EVAL_RESULT: 0,48.3934,0,5,27,33,24" -> "0,48.3934,0,5,27,33,24"
-                    data_part = line.split("EVAL_RESULT:")[1].strip()
+                    # Handle two formats:
+                    # 1. "EVAL_RESULT: 0,48.3934,0,5,27,33,24" (with colon)
+                    # 2. "EVAL_RESULT ... D  0,48.3934,0,5,27,33,24" (without colon, Android logcat format)
+                    if "EVAL_RESULT:" in line:
+                        # Format 1: Has colon
+                        data_part = line.split("EVAL_RESULT:")[1].strip()
+                    else:
+                        # Format 2: Extract data after "D" (which comes after EVAL_RESULT)
+                        # Example: "2025-12-22 20:05:31.112 15122-15199 EVAL_RESULT ... D  0,47.432969,0,5,27,33,24"
+                        # Find "EVAL_RESULT" first, then look for " D " after it
+                        eval_index = line.find("EVAL_RESULT")
+                        if eval_index != -1:
+                            # Look for " D " after EVAL_RESULT
+                            line_after_eval = line[eval_index:]
+                            d_index = line_after_eval.find(" D ")
+                            if d_index == -1:
+                                d_index = line_after_eval.find(" D\t")
+                            if d_index != -1:
+                                # Extract everything after " D " or " D\t"
+                                data_part = line_after_eval[d_index + 3:].strip()
+                            else:
+                                # Fallback: try to find comma-separated data after EVAL_RESULT
+                                # Look for the first occurrence of a pattern like "digit,digit" or "digit,float"
+                                match = re.search(r'(\d+,\d+[.,]\d+|\d+,\d+)', line_after_eval)
+                                if match:
+                                    data_part = line_after_eval[match.start():].strip()
+                                else:
+                                    continue
+                        else:
+                            continue
+                    
                     parts = [p.strip() for p in data_part.split(',')]
 
                     true_label = int(parts[0])
@@ -42,11 +78,11 @@ def analyze_pet_evaluation_logs():
                     print(f"⚠️ Warning: Could not parse line, skipping. Error: {e}\n   Line: '{line.strip()}'")
 
     if not records:
-        print("❌ Error: No valid 'EVAL_RESULT' lines found in the log file.")
+        print("Error: No valid 'EVAL_RESULT' lines found in the log file.")
         return
 
     df = pd.DataFrame(records)
-    print(f"📈 Found {len(df)} valid records to analyze.")
+    print(f"Found {len(df)} valid records to analyze.")
 
     # --- Calculate Metrics ---
     total_images = len(df)
@@ -62,7 +98,7 @@ def analyze_pet_evaluation_logs():
 
     # --- Print Final Report ---
     print("\n========================================")
-    print("✅ Offline Evaluation Complete!")
+    print("Offline Evaluation Complete")
     print("========================================")
     print(f"📊 Total Images:      {total_images}")
     print(f"⏱️ Avg Inference Time: {avg_inference_time:.2f} ms")
@@ -71,4 +107,9 @@ def analyze_pet_evaluation_logs():
     print("========================================")
 
 if __name__ == "__main__":
-    analyze_pet_evaluation_logs()
+    parser = argparse.ArgumentParser(description='Analyze pet classification evaluation logs')
+    parser.add_argument('log_file', nargs='?', default='evaluation_logs.txt',
+                        help='Path to the log file (default: evaluation_logs.txt)')
+    args = parser.parse_args()
+    
+    analyze_pet_evaluation_logs(args.log_file)
