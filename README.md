@@ -17,7 +17,7 @@ End‑to‑end setup for training and deploying **FastViT** models for pet class
 
 ## Benchmarks
 
-On-device performance on Android (Oxford-IIIT Pet dataset, 37 classes):
+On-device performance on Android Legion Phone Duel 2 (Oxford-IIIT Pet dataset, 37 classes):
 
 | Model / Configuration | Avg Inference Time | Top-1 Accuracy | Top-5 Accuracy |
 |----------------------|-------------------|----------------|---------------|
